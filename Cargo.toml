@@ -1,0 +1,9 @@
+[package]
+name = "tomt_async"
+version = "0.1.0"
+edition = "2021"
+authors = [ "TheBeardedQuack", "Tome of Many Things" ]
+
+[features]
+default = ["sync"]
+sync = []
