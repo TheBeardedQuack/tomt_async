@@ -16,7 +16,7 @@ async fn main()
 {
     let shared_mutex = Arc::new(Mutex::new(0));
 
-    do_something(shared_mutex.clone())
+    do_something(shared_mutex.clone()).await;
 }
 
 async do_something(
