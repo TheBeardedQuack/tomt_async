@@ -22,9 +22,10 @@ async fn main()
 async do_something(
     shared_mutex: Arc<Mutex<i32>>
 ) {
-    let lock = shared_mutex.lock().await;
+    let mut lock = shared_mutex.lock().await;
     *lock = *lock + 1;
 
-    // lock is released on drop
+    // lock is released on drop, though it's highly recommended to avoid
+    // calling any async funcs while the lock is held
 }
 ```
