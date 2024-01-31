@@ -29,3 +29,27 @@ async do_something(
     // calling any async funcs while the lock is held
 }
 ```
+
+### `tomt_async::collections::stack`
+
+```rust
+use tomt_async::collections::Stack;
+
+async fn main()
+{
+    let stack = Stack::<i32>::new();
+
+    stack.push(5).await;
+    stack.push(8).await;
+
+    do_something(stack).await;
+}
+
+async fn do_something<T: std::fmt::Debug>(
+    stack: Stack<T>
+) {
+    while let Some(item) = stack.pop().await {
+        println!("Item = {item:?}");
+    }
+}
+```

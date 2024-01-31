@@ -24,8 +24,3 @@ for Yield
         }
     }
 }
-
-pub async fn r#yield()
-{
-    Yield{yielded: false}.await
-}

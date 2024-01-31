@@ -4,11 +4,18 @@ use std::{
     task::Poll,
 };
 
+#[derive(Debug)]
 pub struct AsyncMut<T> {
     pub(in self) holder: AtomicUsize,
     next: AtomicUsize,
     pub(in self) data: UnsafeCell<T>,
 }
+
+unsafe impl<T: Send> Send
+for AsyncMut<T> { }
+
+unsafe impl<T> Sync
+for AsyncMut<T> { }
 
 impl<'me, T> AsyncMut<T>
 {

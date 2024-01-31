@@ -14,17 +14,98 @@ pub struct Stack<T>
     ptr: NonNull<T>,
 }
 
-#[derive(Clone, Debug)]
+unsafe impl<T: Send> Send
+for Stack<T> { }
+
+unsafe impl<T> Sync
+for Stack<T> { }
+
+impl<T: Clone> Clone
+for Stack<T>
+{
+    #[must_use]
+    fn clone(
+        &self
+    ) -> Self {
+        // Lock the internal buffer while we're copying
+        let locked_state = {
+            let (mut desired_old, mut desired_new) = (StackState::default(), StackState::default());
+
+            desired_old.locked = false;
+            desired_new.locked = true;
+
+            while let Err(current) = self.state.compare_exchange(
+                desired_old.into(),
+                desired_new.into(),
+                Ordering::Acquire,
+                Ordering::Relaxed
+            ) {
+                desired_old = current.into();
+                desired_new = current.into();
+
+                desired_old.locked = false;
+                desired_new.locked = true;
+            }
+
+            desired_new
+        };
+
+        // Create a new instance with `with_capacity`
+        // No need to lock as we're the only owner at this point
+        let result = Self::with_capacity(locked_state.length as usize);
+
+        // Then clone items directly from one buffer to the other
+        for n in 1..=locked_state.length as isize {
+            let idx = n - 1;
+            let src = unsafe{
+                self.ptr.as_ptr()
+                    .offset(idx)
+                    .as_ref()
+                    .unwrap_unchecked()
+            };
+            let dst = unsafe {
+                result.ptr.as_ptr()
+                    .offset(idx)
+                    .as_mut()
+                    .unwrap_unchecked()
+            };
+
+            src.clone_into(dst);
+        }
+
+        // Unlock the old vec
+        {
+            let (mut desired_old, mut desired_new) = (locked_state, locked_state);
+
+            desired_old.locked = true;
+            desired_new.locked = false;
+
+            match self.state.compare_exchange(
+                desired_old.into(),
+                desired_new.into(),
+                Ordering::Release,
+                Ordering::Relaxed
+            ) {
+                // Returned cloned instance
+                Ok(_) => result,
+                Err(_lock_mutated) => panic!("Locked resource was mutated outside of held lock"),
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
 struct StackState
 {
     pub capacity: u32,
     pub length: u32,
     pub locked: bool,
 }
+
 impl StackState
 {
     const MASK_LOCK: u64 = 1 << (u64::BITS - 1);
-    pub const MAX_LENGTH: usize = 1 << (u32::BITS - 1);
+    pub const MAX_LENGTH: usize = i32::MAX as usize;
 }
 
 impl From<u64>
@@ -67,35 +148,59 @@ impl<T> Stack<T>
 {
     pub const MAX_LENGTH: usize = StackState::MAX_LENGTH;
     
+    #[inline]
     pub fn new(
         // no args
     ) -> Self {
-        Self {
-            state: Default::default(),
-            ptr: NonNull::dangling(),
-        }
+        Self::with_capacity(0)
+    }
+
+    #[inline]
+    fn get_state(
+        &self
+    ) -> StackState {
+        self.state.load(Ordering::Relaxed).into()
+    }
+
+    pub fn length(
+        &self
+    ) -> u32 {
+        self.get_state().length
+    }
+
+    pub fn capacity(
+        &self
+    ) -> u32 {
+        self.get_state().capacity
     }
 
     pub fn with_capacity(
         capcacity: usize
-    ) -> Option<Self> {
+    ) -> Self {
         assert!(capcacity <= Self::MAX_LENGTH);
 
-        let layout = std::alloc::Layout::array::<T>(capcacity).expect("Attempt to allocate internal buffer, with an invalid memory layout");
-        let raw_ptr = unsafe { std::alloc::alloc(layout) as *mut T };
-
-        NonNull::new(raw_ptr).map(|valid_ptr| {
+        if capcacity == 0 {
+            Self {
+                state: Default::default(),
+                ptr: NonNull::dangling(),
+            }
+        }
+        else {
+            let layout = std::alloc::Layout::array::<T>(capcacity).expect("Attempt to allocate internal buffer, with an invalid memory layout");
+            let raw_ptr = unsafe { std::alloc::alloc(layout) as *mut T };
+    
+            let valid_ptr = NonNull::new(raw_ptr).expect("Memory allocation failed");
             let state = StackState{
                 capacity: capcacity as u32,
                 length: 0,
                 locked: false,
             };
-
+            
             Self {
                 state: AtomicU64::new(state.into()),
                 ptr: valid_ptr,
             }
-        })
+        }
     }
 
     pub async fn push(
@@ -104,11 +209,10 @@ impl<T> Stack<T>
     ) {
         // Get the next index and lock the vec
         let locked_state: StackState = {
-            let mut old_state: StackState = self.state.load(Ordering::Relaxed).into();
+            let mut desired_old = StackState::default();
 
             future::poll_fn(|_| {
-                let (mut desired_old, mut desired_new) = (old_state.clone(), old_state.clone());
-                desired_old.locked = false;
+                let mut desired_new = desired_old;
 
                 desired_new.locked = true;
                 desired_new.length += 1;
@@ -116,12 +220,13 @@ impl<T> Stack<T>
                 match self.state.compare_exchange(
                     desired_old.into(),
                     desired_new.into(),
-                    Ordering::Release,
+                    Ordering::Acquire,
                     Ordering::Relaxed
                 ) {
                     Ok(state) => Poll::Ready(state.into()),
                     Err(state) => {
-                        old_state = state.into();
+                        desired_old = state.into();
+                        desired_old.locked = false;
                         Poll::Pending
                     }
                 }
@@ -176,7 +281,7 @@ impl<T> Stack<T>
 
         // Unlock our state
         future::poll_fn(|_| {
-            let (mut desired_old, mut desired_new) = (locked_state.clone(), locked_state.clone());
+            let (mut desired_old, mut desired_new) = (locked_state, locked_state);
             desired_old.locked = true;
             desired_new.locked = false;
 
@@ -197,22 +302,22 @@ impl<T> Stack<T>
     ) -> Option<T> {
         // Get the next index and lock the vec
         let locked_state: StackState = {
-            let mut old_state: StackState = self.state.load(Ordering::Relaxed).into();
+            let mut desired_old = StackState::default();
 
             future::poll_fn(|_| {
-                let (mut desired_old, mut desired_new) = (old_state.clone(), old_state.clone());
-                desired_old.locked = false;
+                let mut desired_new = desired_old;
                 desired_new.locked = true;
 
                 match self.state.compare_exchange(
                     desired_old.into(),
                     desired_new.into(),
-                    Ordering::Release,
+                    Ordering::Acquire,
                     Ordering::Relaxed
                 ) {
                     Ok(state) => Poll::Ready(state.into()),
                     Err(state) => {
-                        old_state = state.into();
+                        desired_old = state.into();
+                        desired_old.locked = false;
                         Poll::Pending
                     }
                 }
@@ -238,7 +343,7 @@ impl<T> Stack<T>
 
         // Unlock our state
         future::poll_fn(|_| {
-            let (mut desired_old, mut desired_new) = (locked_state.clone(), locked_state.clone());
+            let (mut desired_old, mut desired_new) = (locked_state, locked_state);
             desired_old.locked = true;
             desired_new.locked = false;
             desired_new.length = index as u32;
