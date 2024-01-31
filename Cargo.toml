@@ -1,11 +1,12 @@
 [package]
 name = "tomt_async"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = [ "TheBeardedQuack", "Tome of Many Things" ]
 description = "Primarily a dumping ground for personal async snippets that may be used in other ToMT projects. If this crate is useful to others please let us know."
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["sync"]
+default = ["collections", "sync"]
+collections = []
 sync = []
